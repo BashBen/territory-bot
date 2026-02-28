@@ -1,0 +1,4 @@
+TARGET_ISLAND_COUNT = 3
+
+# width by height
+ISLAND_GRID_SIZE = [512, 512]
