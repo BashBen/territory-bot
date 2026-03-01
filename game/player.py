@@ -2,25 +2,37 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from game.terrain import LAND
 
 
+@dataclass(slots=True)
+class Player:
+    """Player state tracked by the game loop."""
+
+    spawn_row: int
+    spawn_col: int
+    balance: int = 0
+    income_value: int = 0
+
+
 def spawn_player(
     game_map: np.ndarray,
-    players: dict[int, tuple[int, int]],
-    next_player_id: int,
+    players: dict[int, Player],
+    player_id: int,
     rng: np.random.Generator | None = None,
     *,
     max_player_count: int,
     claim_radius: int,
-) -> tuple[int, int]:
+) -> bool:
     """Spawn one player and claim surrounding land.
 
     Returns:
-    - `(player_id, updated_next_player_id)` on success.
-    - `(-1, next_player_id)` when no unoccupied land remains.
+    - `True` on success.
+    - `False` when no unoccupied land remains.
 
     Raises:
     - `ValueError` when `max_player_count` would be exceeded.
@@ -32,10 +44,9 @@ def spawn_player(
 
     spawn_cell = _choose_spawn_cell(game_map=game_map, rng=rng)
     if spawn_cell is None:
-        return -1, next_player_id
+        return False
 
     spawn_row, spawn_col = spawn_cell
-    player_id = next_player_id
 
     game_map[spawn_row, spawn_col] = player_id
     _claim_radius(
@@ -46,8 +57,11 @@ def spawn_player(
         radius=claim_radius,
     )
 
-    players[player_id] = (spawn_row, spawn_col)
-    return player_id, next_player_id + 1
+    players[player_id] = Player(
+        spawn_row=spawn_row,
+        spawn_col=spawn_col,
+    )
+    return True
 
 
 def _ensure_capacity(player_count: int, max_player_count: int) -> None:

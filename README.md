@@ -19,13 +19,14 @@ state = game.get_state()
   New players also claim nearby unoccupied land in a radius of `5`.
   Raises `ValueError` if you try to add more than `MAX_PLAYER_COUNT` (100).
 - `action(player_id, payload) -> bool`: queues an action for that player.
-- `tick() -> int`: advances one tick (currently increments tick counter and clears queued actions).
+- `tick() -> int`: applies interest to all players, then advances one tick.
 - `get_state() -> np.ndarray`: returns a copy of the map state.
+- `game.players[player_id]`: `Player` object with `balance`, `income_value`, and spawn coordinates.
 
 ## Interest helpers
 
 - `game.interest` contains pure functions for:
-  occupation fraction, territorial rate, initial augmentation, cap limiter,
+  territorial rate, initial augmentation, cap limiter,
   total tick rate, and `apply_interest(...)` for capped balance updates.
 
 ## Map values
