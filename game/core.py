@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
 
 import numpy as np
 
+from game.actions import ActionEngine
+from game.actions.payloads import ActionPayload, AttackPayload
 from game.constants import FIRST_PLAYER_ID, MAX_PLAYER_COUNT, SPAWN_CLAIM_RADIUS
 from game.interest import apply_interest
 from game.player import Player, spawn_player
@@ -30,31 +32,51 @@ class Game:
 
         self._rng = np.random.default_rng(seed)
         self._next_player_id = FIRST_PLAYER_ID
-        self._pending_actions: list[tuple[int, Any]] = []
         self._occupiable_area = int(np.count_nonzero(self.map != 0))
+        self._action_engine = ActionEngine()
 
     def tick(self) -> int:
         """Advance game time by one tick.
 
-        Applies interest to all players, then increments tick count.
+        Applies interest and advances queued/in-progress actions.
         """
         self._apply_interest_to_players(tick=self.tick_count)
+        self._action_engine.tick(
+            game_map=self.map,
+            players=self.players,
+        )
         self.tick_count += 1
-        self._pending_actions.clear()
         return self.tick_count
 
-    def action(self, player_id: int, payload: Any) -> bool:
-        """Queue an action for a player.
-
-        Returns:
-        - True when action is accepted
-        - False when the player does not exist
-        """
+    def attack(
+        self, player_id: int, payload: AttackPayload | Mapping[str, object]
+    ) -> bool:
+        """Queue an attack for the next tick."""
         if player_id not in self.players:
             return False
 
-        self._pending_actions.append((player_id, payload))
-        return True
+        return self._action_engine.attack(
+            game_map=self.map,
+            players=self.players,
+            player_id=player_id,
+            payload=payload,
+        )
+
+    def action(
+        self, player_id: int, payload: ActionPayload | Mapping[str, object]
+    ) -> bool:
+        """Queue an action for the next tick.
+
+        Returns:
+        - True when action is queued
+        - False when player is invalid or action preconditions fail
+        """
+        return self._action_engine.action(
+            game_map=self.map,
+            players=self.players,
+            player_id=player_id,
+            payload=payload,
+        )
 
     def get_state(self) -> np.ndarray:
         """Return a copy of the current map state."""

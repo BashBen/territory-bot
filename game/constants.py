@@ -39,3 +39,15 @@ INITIAL_AUGMENTATION_DURATION_TICKS = 214.0
 # Balance limits are area-scaled: soft = 100*A, hard = 150*A.
 SOFT_CAP_AREA_MULTIPLIER = 100
 HARD_CAP_AREA_MULTIPLIER = 150
+
+# --------------------------------
+# Attack
+# --------------------------------
+
+# Land attack tax = A * LAND_ATTACK_TAX_FRACTION.
+LAND_ATTACK_TAX_FRACTION = 12 / 1024
+
+# Modeling assumptions for map capture budget.
+# Defended cost is used only while a defending player still has balance.
+LAND_ATTACK_UNDEFENDED_TILE_COST = 1
+LAND_ATTACK_DEFENDED_TILE_COST = 2
