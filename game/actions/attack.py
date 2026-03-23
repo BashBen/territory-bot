@@ -114,7 +114,8 @@ def _queue_attack(
     payload: AttackPayload | Mapping[str, object],
 ) -> bool:
     """Validate and queue one player action."""
-    if player_id not in players or not isinstance(payload, Mapping):
+    attacker = players.get(player_id)
+    if attacker is None or not attacker.is_alive or not isinstance(payload, Mapping):
         return False
 
     action_type = str(payload.get("type", "attack")).strip().lower()
@@ -224,7 +225,7 @@ def _start_attack_from_intent(
 ) -> _ActiveAttack | None:
     # Revalidate that the queued intent still makes sense at execution time.
     attacker = players.get(intent.attacker_id)
-    if attacker is None:
+    if attacker is None or not attacker.is_alive:
         return None
 
     if not _in_bounds(game_map, intent.target_row, intent.target_col):
@@ -295,6 +296,10 @@ def _advance_single_attack_layer(
     players: dict[int, Player],
     attack: _ActiveAttack,
 ) -> bool:
+    attacker = players.get(attack.attacker_id)
+    if attacker is None or not attacker.is_alive:
+        return False
+
     if attack.remaining_attack_units <= 0 or not attack.frontier:
         return False
 
@@ -346,7 +351,7 @@ def _apply_defender_balance_damage(
         return
 
     defender = players.get(attack.defender_id)
-    if defender is None or defender.balance <= 0:
+    if defender is None or not defender.is_alive or defender.balance <= 0:
         return
 
     if attack.defender_damage_budget_remaining <= 0:
@@ -369,7 +374,7 @@ def _tile_cost_for_owner(*, owner: int, players: dict[int, Player]) -> int:
         return LAND_ATTACK_UNDEFENDED_TILE_COST
 
     owner_player = players.get(owner)
-    if owner_player is not None and owner_player.balance > 0:
+    if owner_player is not None and owner_player.is_alive and owner_player.balance > 0:
         return LAND_ATTACK_DEFENDED_TILE_COST
     return LAND_ATTACK_UNDEFENDED_TILE_COST
 

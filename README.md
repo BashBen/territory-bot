@@ -23,7 +23,8 @@ balance_map = state[1]
 - `attack(player_id, payload) -> bool`: queues an attack for the next tick.
   Payload: `{"type": "attack", "target": [row, col], "percentage": 0.25}`.
 - `action(player_id, payload) -> bool`: compatibility wrapper that currently routes to `attack(...)`.
-- `tick() -> int`: applies interest and advances active attacks by one BFS layer.
+- `tick() -> list[GameEvent]`: applies interest, advances active attacks by one
+  BFS layer, and returns any events emitted by the new state.
 - `get_state(relative=None) -> np.ndarray`: returns a state array with shape
   `(2, rows, cols)`.
   `state[0]` is the ownership map.
@@ -33,7 +34,19 @@ balance_map = state[1]
   in `state[0]`, and existing player `2` tiles are remapped to that player ID.
   This is intended for agent/NN inputs where player `2` should always mean
   "self".
-- `game.players[player_id]`: `Player` object with `balance`, `income_value`, and spawn coordinates.
+- `game.players[player_id]`: `Player` object with `balance`, `income_value`,
+  spawn coordinates, `is_alive`, and `eliminated_tick`.
+
+## Tick events
+
+- `PlayerGameOverEvent`: emitted when a player owns `0` land tiles after a tick.
+  Fields: `type="player_game_over"`, `tick`, `player_id`.
+- `GameWonEvent`: emitted once when a living player reaches at least
+  `GAME_WIN_OCCUPATION_FRACTION` of occupiable land tiles.
+  Fields: `type="game_won"`, `tick`, `player_id`, `occupation_fraction`.
+- Dead players stay in `game.players` but are marked with `is_alive=False`,
+  have `eliminated_tick` set, stop gaining interest, and can no longer queue
+  actions.
 
 ## Interest helpers
 
@@ -58,4 +71,5 @@ balance_map = state[1]
 - `attack` fails when target is water, your own tile, or a non-touching region.
 - `attack` spreads from all border tiles where your land touches the targeted region.
 - `attack` also fails if you already have an active/pending attack against that same defender.
+- The win threshold is `0.95` of occupiable land tiles (`GAME_WIN_OCCUPATION_FRACTION`).
 - `get_state()` returns a copy; editing it does not mutate the game state.

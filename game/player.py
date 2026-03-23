@@ -17,6 +17,8 @@ class Player:
     spawn_col: int
     balance: int = 0
     income_value: int = 0
+    is_alive: bool = True
+    eliminated_tick: int | None = None
 
 
 def spawn_player(

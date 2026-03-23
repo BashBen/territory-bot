@@ -20,6 +20,8 @@ FIRST_PLAYER_ID = 2
 # Amount of land you get when you spawn in. This will claim
 # less if it's crowded by other players or the ocean.
 SPAWN_CLAIM_RADIUS = 5
+# Fraction of occupiable tiles needed to win the game.
+GAME_WIN_OCCUPATION_FRACTION = 0.95
 
 # --------------------------------
 # Interest and balance
