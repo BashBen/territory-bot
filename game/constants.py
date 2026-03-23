@@ -5,7 +5,7 @@
 # --------------------------------
 
 # Number of large islands to generate in the base map.
-TARGET_ISLAND_COUNT = 3
+TARGET_ISLAND_COUNT = 1
 # This is the tiles in the grid.
 # Tiles are the smallest piece of island the player can have.
 ISLAND_GRID_SIZE = [512, 512]

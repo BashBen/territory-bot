@@ -78,9 +78,42 @@ class Game:
             payload=payload,
         )
 
-    def get_state(self) -> np.ndarray:
-        """Return a copy of the current map state."""
-        return self.map.copy()
+    def get_state(self, relative: int | None = None) -> np.ndarray:
+        """Return a stacked state array with ownership and per-tile balances.
+
+        Args:
+        - `relative`: optional player ID to view as player `2`.
+          When set, the returned ownership layer swaps that player's tiles with
+          player `2`'s tiles. This keeps the caller's perspective normalized so
+          player `2` always means "self". The balance layer is not remapped
+          because it stores balances, not player IDs.
+
+        Returns:
+        - `state` with shape `(2, rows, cols)` where:
+          - `state[0]` is the ownership map.
+          - `state[1]` is the balance map.
+        - The balance layer stores each owner's balance on their land tiles,
+          with water and unoccupied land set to `0`.
+        """
+        ownership_map = self.map.copy()
+        if relative is not None and relative != FIRST_PLAYER_ID:
+            if relative < FIRST_PLAYER_ID:
+                raise ValueError(
+                    f"relative must be >= {FIRST_PLAYER_ID}, got {relative}."
+                )
+
+            relative_mask = ownership_map == relative
+            first_player_mask = ownership_map == FIRST_PLAYER_ID
+            ownership_map[relative_mask] = FIRST_PLAYER_ID
+            ownership_map[first_player_mask] = relative
+
+        max_id = max(int(self.map.max()), max(self.players, default=1))
+        balance_by_id = np.zeros(max_id + 1, dtype=np.int64)
+        for player_id, player in self.players.items():
+            balance_by_id[player_id] = player.balance
+        balance_map = balance_by_id[self.map]
+
+        return np.stack((ownership_map.astype(np.int64, copy=False), balance_map))
 
     def add_player(self) -> int:
         """Create a new player and spawn on unoccupied land.

@@ -10,6 +10,8 @@ from game.core import Game
 game = Game(seed=42)
 player_id = game.add_player()
 state = game.get_state()
+ownership_map = state[0]
+balance_map = state[1]
 ```
 
 ## API summary
@@ -22,7 +24,15 @@ state = game.get_state()
   Payload: `{"type": "attack", "target": [row, col], "percentage": 0.25}`.
 - `action(player_id, payload) -> bool`: compatibility wrapper that currently routes to `attack(...)`.
 - `tick() -> int`: applies interest and advances active attacks by one BFS layer.
-- `get_state() -> np.ndarray`: returns a copy of the map state.
+- `get_state(relative=None) -> np.ndarray`: returns a state array with shape
+  `(2, rows, cols)`.
+  `state[0]` is the ownership map.
+  `state[1]` is the balance map, which stores the owning player's balance on
+  each owned tile, with water and unoccupied land set to `0`.
+  When `relative` is set to a player ID, that player's land is remapped to `2`
+  in `state[0]`, and existing player `2` tiles are remapped to that player ID.
+  This is intended for agent/NN inputs where player `2` should always mean
+  "self".
 - `game.players[player_id]`: `Player` object with `balance`, `income_value`, and spawn coordinates.
 
 ## Interest helpers
