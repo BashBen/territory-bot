@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from game.constants import INITIAL_PLAYER_BALANCE
 from game.terrain import LAND
 
 
@@ -62,6 +63,7 @@ def spawn_player(
     players[player_id] = Player(
         spawn_row=spawn_row,
         spawn_col=spawn_col,
+        balance=INITIAL_PLAYER_BALANCE,
     )
     return True
 
