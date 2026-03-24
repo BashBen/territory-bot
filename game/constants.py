@@ -5,7 +5,7 @@
 # --------------------------------
 
 # Number of large islands to generate in the base map.
-TARGET_ISLAND_COUNT = 3
+TARGET_ISLAND_COUNT = 1
 # This is the tiles in the grid.
 # Tiles are the smallest piece of island the player can have.
 ISLAND_GRID_SIZE = [512, 512]
@@ -20,6 +20,10 @@ FIRST_PLAYER_ID = 2
 # Amount of land you get when you spawn in. This will claim
 # less if it's crowded by other players or the ocean.
 SPAWN_CLAIM_RADIUS = 5
+# Starting balance granted to newly spawned players.
+INITIAL_PLAYER_BALANCE = 512
+# Fraction of occupiable tiles needed to win the game.
+GAME_WIN_OCCUPATION_FRACTION = 0.95
 
 # --------------------------------
 # Interest and balance

@@ -8,7 +8,13 @@ import numpy as np
 
 from game.actions import ActionEngine
 from game.actions.payloads import ActionPayload, AttackPayload
-from game.constants import FIRST_PLAYER_ID, MAX_PLAYER_COUNT, SPAWN_CLAIM_RADIUS
+from game.constants import (
+    FIRST_PLAYER_ID,
+    GAME_WIN_OCCUPATION_FRACTION,
+    MAX_PLAYER_COUNT,
+    SPAWN_CLAIM_RADIUS,
+)
+from game.events import GameEvent, GameWonEvent, PlayerGameOverEvent
 from game.interest import apply_interest
 from game.player import Player, spawn_player
 from game.terrain import generate_terrain_grid
@@ -34,25 +40,30 @@ class Game:
         self._next_player_id = FIRST_PLAYER_ID
         self._occupiable_area = int(np.count_nonzero(self.map != 0))
         self._action_engine = ActionEngine()
+        self.winner_id: int | None = None
 
-    def tick(self) -> int:
-        """Advance game time by one tick.
+    def tick(self) -> list[GameEvent]:
+        """Advance game time by one tick and return emitted events.
 
-        Applies interest and advances queued/in-progress actions.
+        Applies interest, advances queued/in-progress actions, and emits any
+        elimination or win events produced by the new state.
         """
         self._apply_interest_to_players(tick=self.tick_count)
         self._action_engine.tick(
             game_map=self.map,
             players=self.players,
         )
-        self.tick_count += 1
-        return self.tick_count
+        next_tick = self.tick_count + 1
+        events = self._collect_tick_events(tick=next_tick)
+        self.tick_count = next_tick
+        return events
 
     def attack(
         self, player_id: int, payload: AttackPayload | Mapping[str, object]
     ) -> bool:
         """Queue an attack for the next tick."""
-        if player_id not in self.players:
+        player = self.players.get(player_id)
+        if player is None or not player.is_alive:
             return False
 
         return self._action_engine.attack(
@@ -71,6 +82,10 @@ class Game:
         - True when action is queued
         - False when player is invalid or action preconditions fail
         """
+        player = self.players.get(player_id)
+        if player is None or not player.is_alive:
+            return False
+
         return self._action_engine.action(
             game_map=self.map,
             players=self.players,
@@ -78,9 +93,42 @@ class Game:
             payload=payload,
         )
 
-    def get_state(self) -> np.ndarray:
-        """Return a copy of the current map state."""
-        return self.map.copy()
+    def get_state(self, relative: int | None = None) -> np.ndarray:
+        """Return a stacked state array with ownership and per-tile balances.
+
+        Args:
+        - `relative`: optional player ID to view as player `2`.
+          When set, the returned ownership layer swaps that player's tiles with
+          player `2`'s tiles. This keeps the caller's perspective normalized so
+          player `2` always means "self". The balance layer is not remapped
+          because it stores balances, not player IDs.
+
+        Returns:
+        - `state` with shape `(2, rows, cols)` where:
+          - `state[0]` is the ownership map.
+          - `state[1]` is the balance map.
+        - The balance layer stores each owner's balance on their land tiles,
+          with water and unoccupied land set to `0`.
+        """
+        ownership_map = self.map.copy()
+        if relative is not None and relative != FIRST_PLAYER_ID:
+            if relative < FIRST_PLAYER_ID:
+                raise ValueError(
+                    f"relative must be >= {FIRST_PLAYER_ID}, got {relative}."
+                )
+
+            relative_mask = ownership_map == relative
+            first_player_mask = ownership_map == FIRST_PLAYER_ID
+            ownership_map[relative_mask] = FIRST_PLAYER_ID
+            ownership_map[first_player_mask] = relative
+
+        max_id = max(int(self.map.max()), max(self.players, default=1))
+        balance_by_id = np.zeros(max_id + 1, dtype=np.int64)
+        for player_id, player in self.players.items():
+            balance_by_id[player_id] = player.balance
+        balance_map = balance_by_id[self.map]
+
+        return np.stack((ownership_map.astype(np.int64, copy=False), balance_map))
 
     def add_player(self) -> int:
         """Create a new player and spawn on unoccupied land.
@@ -113,6 +161,8 @@ class Game:
         max_player_id = max(self.players)
         owned_counts = np.bincount(self.map.ravel(), minlength=max_player_id + 1)
         for player_id, player in self.players.items():
+            if not player.is_alive:
+                continue
             owned_area = int(owned_counts[player_id])
             new_balance, _, _ = apply_interest(
                 balance=player.balance,
@@ -121,3 +171,41 @@ class Game:
                 tick=tick,
             )
             player.balance = new_balance
+
+    def _collect_tick_events(self, tick: int) -> list[GameEvent]:
+        if not self.players:
+            return []
+
+        max_player_id = max(self.players)
+        owned_counts = np.bincount(self.map.ravel(), minlength=max_player_id + 1)
+        events: list[GameEvent] = []
+
+        for player_id, player in self.players.items():
+            owned_area = int(owned_counts[player_id])
+            # Update the dead players.
+            if player.is_alive and owned_area == 0:
+                player.is_alive = False
+                player.eliminated_tick = tick
+                player.balance = 0
+                events.append(PlayerGameOverEvent(tick=tick, player_id=player_id))
+
+        # check to see if someone won.
+        if self.winner_id is None and self._occupiable_area > 0:
+            for player_id, player in self.players.items():
+                if not player.is_alive:
+                    continue
+
+                owned_area = int(owned_counts[player_id])
+                occupation_fraction = owned_area / self._occupiable_area
+                if occupation_fraction >= GAME_WIN_OCCUPATION_FRACTION:
+                    self.winner_id = player_id
+                    events.append(
+                        GameWonEvent(
+                            tick=tick,
+                            player_id=player_id,
+                            occupation_fraction=occupation_fraction,
+                        )
+                    )
+                    break
+
+        return events
