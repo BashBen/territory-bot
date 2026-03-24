@@ -41,6 +41,7 @@ class GameWindow(QMainWindow):
     ATTACK_PERCENTAGE = 0.25
     MIN_TICK_INTERVAL_MS = 50
     MAX_TICK_INTERVAL_MS = 2000
+    INITIAL_BOT_COUNT = 50
 
     def __init__(self) -> None:
         super().__init__()
@@ -49,6 +50,9 @@ class GameWindow(QMainWindow):
         self.player2_id = self.game.add_player()
         if self.player2_id != 2:
             raise RuntimeError(f"Expected first spawned player to be 2, got {self.player2_id}.")
+        for _ in range(self.INITIAL_BOT_COUNT):
+            if self.game.add_bot() == -1:
+                break
 
         self.setWindowTitle("Territory Bot Viewer")
         self.resize(1100, 760)

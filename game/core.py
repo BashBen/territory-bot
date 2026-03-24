@@ -8,6 +8,7 @@ import numpy as np
 
 from game.actions import ActionEngine
 from game.actions.payloads import ActionPayload, AttackPayload
+from game.bots import BorderBot, Bot
 from game.constants import (
     FIRST_PLAYER_ID,
     GAME_WIN_OCCUPATION_FRACTION,
@@ -56,6 +57,8 @@ class Game:
         next_tick = self.tick_count + 1
         events = self._collect_tick_events(tick=next_tick)
         self.tick_count = next_tick
+        if self.winner_id is None:
+            self._queue_bot_actions()
         return events
 
     def attack(
@@ -154,6 +157,33 @@ class Game:
             return player_id
         return -1
 
+    def add_bot(
+        self,
+        bot_type: type[Bot] = BorderBot,
+        **bot_kwargs: object,
+    ) -> int:
+        """Spawn one bot-controlled player.
+
+        The bot is wired into the main game loop and will choose one action
+        payload after each completed tick. That payload is queued for the next
+        tick through the normal action API.
+        """
+        player_id = self.add_player()
+        if player_id == -1:
+            return -1
+
+        player = self.players[player_id]
+        self.players[player_id] = bot_type(
+            spawn_row=player.spawn_row,
+            spawn_col=player.spawn_col,
+            balance=player.balance,
+            income_value=player.income_value,
+            is_alive=player.is_alive,
+            eliminated_tick=player.eliminated_tick,
+            **bot_kwargs,
+        )
+        return player_id
+
     def _apply_interest_to_players(self, tick: int) -> None:
         if not self.players:
             return
@@ -209,3 +239,12 @@ class Game:
                     break
 
         return events
+
+    def _queue_bot_actions(self) -> None:
+        for player_id, player in self.players.items():
+            if not isinstance(player, Bot) or not player.is_alive:
+                continue
+            payload = player.make_choice(player_id=player_id, game=self)
+            if payload is None:
+                continue
+            self.action(player_id=player_id, payload=payload)

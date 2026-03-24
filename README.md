@@ -9,6 +9,7 @@ from game.core import Game
 
 game = Game(seed=42)
 player_id = game.add_player()
+bot_id = game.add_bot()
 state = game.get_state()
 ownership_map = state[0]
 balance_map = state[1]
@@ -32,6 +33,9 @@ stats plus recent events.
 - `add_player() -> int`: spawns a player on unoccupied land and returns the player ID.
   New players also claim nearby unoccupied land in a radius of `5`.
   Raises `ValueError` if you try to add more than `MAX_PLAYER_COUNT` (100).
+- `add_bot(bot_type=BorderBot, **bot_kwargs) -> int`: spawns a bot-controlled
+  player and wires it into the game loop so it auto-queues actions for future
+  ticks through the normal action API.
 - `attack(player_id, payload) -> bool`: queues an attack for the next tick.
   Payload: `{"type": "attack", "target": [row, col], "percentage": 0.25}`.
 - `action(player_id, payload) -> bool`: compatibility wrapper that currently routes to `attack(...)`.
@@ -48,6 +52,10 @@ stats plus recent events.
   "self".
 - `game.players[player_id]`: `Player` object with `balance`, `income_value`,
   spawn coordinates, `is_alive`, and `eliminated_tick`.
+- `game.bots.Bot`: abstract player subtype with
+  `make_choice(player_id=..., game=...) -> ActionPayload | None`.
+- `game.bots.BorderBot`: built-in bot that attacks the first reachable hostile
+  or neutral border tile using `25%` of its balance.
 
 ## Tick events
 
