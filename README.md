@@ -14,6 +14,18 @@ ownership_map = state[0]
 balance_map = state[1]
 ```
 
+## Qt viewer
+
+Install dependencies, then run:
+
+```bash
+python qt_frontend.py
+```
+
+The viewer auto-spawns player `2`, starts ticking every `0.5s`, shows a live
+ownership map from player `2`'s relative perspective, and displays player/game
+stats plus recent events.
+
 ## API summary
 
 - `Game(seed=None, land_coverage=0.62)`: builds the terrain map on init.
