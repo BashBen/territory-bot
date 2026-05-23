@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from game.constants import (
@@ -19,6 +19,9 @@ from game.player import Player
 from game.terrain import WATER
 
 __all__ = ["AttackEngine"]
+
+# 4-neighbor dilation (one tile outward per tick).
+_KERNEL_4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=np.uint8)
 
 
 @dataclass(slots=True)
@@ -34,15 +37,13 @@ class _AttackIntent:
 
 @dataclass(slots=True)
 class _ActiveAttack:
-    """In-progress BFS wave attack that advances one layer per tick."""
+    """In-progress invasion of a frozen target region."""
 
     attacker_id: int
     defender_id: int
     remaining_attack_units: int
     defender_damage_budget_remaining: int
     component_mask: np.ndarray
-    visited: np.ndarray
-    frontier: list[tuple[int, int]]
     defender_damage_carry: float = 0.0
 
 
@@ -97,8 +98,7 @@ class AttackEngine(ActionHandler):
             active_attacks=self._active_attacks,
             pending_actions=self._pending_actions,
         )
-        # Clash before BFS so reciprocal attacks compare strength without border
-        # tile order mattering, and so same-tick counters work on current units.
+        # Clash before expansion so reciprocal attacks compare strength first.
         _resolve_mutual_clashes(active_attacks=self._active_attacks)
         _advance_active_attacks(
             game_map=game_map,
@@ -137,18 +137,20 @@ def _queue_attack(
     if target_owner == WATER or target_owner == player_id:
         return False
 
-    _, component_tiles = _collect_connected_component(
+    component_mask = _connected_component_mask(
         game_map=game_map,
         start_row=target_row,
         start_col=target_col,
         owner_id=target_owner,
     )
-    border_tiles = _component_border_tiles_touching_player(
+    if component_mask is None:
+        return False
+
+    if not _component_touches_player(
         game_map=game_map,
-        component_tiles=component_tiles,
+        component_mask=component_mask,
         player_id=player_id,
-    )
-    if not border_tiles:
+    ):
         return False
 
     if target_owner >= 2 and _already_attacking_defender(
@@ -199,8 +201,8 @@ def _resolve_queued_actions(
 def _resolve_mutual_clashes(*, active_attacks: list[_ActiveAttack]) -> None:
     """Resolve reciprocal attack pairs before waves expand.
 
-    Reciprocal A↔B waves never share BFS tiles (each invades the other's land), so
-    clash is pair-level on remaining_attack_units, not frontier intersection.
+    Reciprocal A↔B waves never share target tiles (each invades the other's land), so
+    clash is pair-level on remaining_attack_units, not tile intersection.
     """
     if len(active_attacks) < 2:
         return
@@ -264,16 +266,18 @@ def _advance_active_attacks(
     players: dict[int, Player],
     active_attacks: list[_ActiveAttack],
 ) -> None:
-    """Advance each active attack by one BFS layer."""
+    """Advance each active attack by one dilation step into its target region."""
     if not active_attacks:
         return
 
+    cost_lookup = _build_tile_cost_lookup(game_map=game_map, players=players)
     remaining: list[_ActiveAttack] = []
     for attack in active_attacks:
         still_active = _advance_single_attack_layer(
             game_map=game_map,
             players=players,
             attack=attack,
+            cost_lookup=cost_lookup,
         )
         if still_active:
             remaining.append(attack)
@@ -311,19 +315,20 @@ def _start_attack_from_intent(
     ):
         return None
 
-    # Rebuild the intended connected component and confirm attacker contact.
-    component_mask, component_tiles = _collect_connected_component(
+    component_mask = _connected_component_mask(
         game_map=game_map,
         start_row=intent.target_row,
         start_col=intent.target_col,
         owner_id=target_owner,
     )
-    border_tiles = _component_border_tiles_touching_player(
+    if component_mask is None:
+        return None
+
+    if not _component_touches_player(
         game_map=game_map,
-        component_tiles=component_tiles,
+        component_mask=component_mask,
         player_id=intent.attacker_id,
-    )
-    if not border_tiles:
+    ):
         return None
 
     # Reserve balance once up front and convert to taxed attack units.
@@ -338,20 +343,12 @@ def _start_attack_from_intent(
     if true_attack_units <= 0:
         return None
 
-    # Seed the initial frontier from every touching border tile.
-    seed_tiles = list(border_tiles)
-    visited = np.zeros(game_map.shape, dtype=bool)
-    for row, col in seed_tiles:
-        visited[row, col] = True
-
     return _ActiveAttack(
         attacker_id=intent.attacker_id,
         defender_id=target_owner,
         remaining_attack_units=true_attack_units,
         defender_damage_budget_remaining=max(0, int(round(true_attack_units / 2.0))),
         component_mask=component_mask,
-        visited=visited,
-        frontier=list(seed_tiles),
     )
 
 
@@ -360,41 +357,30 @@ def _advance_single_attack_layer(
     game_map: np.ndarray,
     players: dict[int, Player],
     attack: _ActiveAttack,
+    cost_lookup: np.ndarray,
 ) -> bool:
     attacker = players.get(attack.attacker_id)
     if attacker is None or not attacker.is_alive:
         return False
 
-    if attack.remaining_attack_units <= 0 or not attack.frontier:
+    if attack.remaining_attack_units <= 0:
         return False
 
-    next_frontier: list[tuple[int, int]] = []
-    spent_vs_defender_units = 0
+    capturable = _compute_capturable_mask(game_map=game_map, attack=attack)
+    if not capturable.any():
+        return False
 
-    for row, col in attack.frontier:
-        if not attack.component_mask[row, col]:
-            continue
+    owners = game_map[capturable]
+    tile_costs = cost_lookup[owners]
+    total_cost = int(tile_costs.sum())
+    if total_cost > attack.remaining_attack_units:
+        # Cannot afford this ring — end attack without mutating the map.
+        return False
 
-        owner = int(game_map[row, col])
-        if owner != attack.attacker_id and owner != WATER:
-            tile_cost = _tile_cost_for_owner(owner=owner, players=players)
-            if attack.remaining_attack_units >= tile_cost:
-                attack.remaining_attack_units -= tile_cost
-                game_map[row, col] = attack.attacker_id
-                if owner == attack.defender_id:
-                    spent_vs_defender_units += tile_cost
+    spent_vs_defender_units = int(tile_costs[owners == attack.defender_id].sum())
 
-        # The wave only spreads through tiles already captured by attacker.
-        if int(game_map[row, col]) != attack.attacker_id:
-            continue
-
-        for n_row, n_col in _neighbors4(game_map, row, col):
-            if attack.visited[n_row, n_col]:
-                continue
-            if not attack.component_mask[n_row, n_col]:
-                continue
-            attack.visited[n_row, n_col] = True
-            next_frontier.append((n_row, n_col))
+    game_map[capturable] = np.uint8(attack.attacker_id)
+    attack.remaining_attack_units -= total_cost
 
     _apply_defender_balance_damage(
         players=players,
@@ -402,8 +388,80 @@ def _advance_single_attack_layer(
         spent_vs_defender_units=spent_vs_defender_units,
     )
 
-    attack.frontier = next_frontier
-    return attack.remaining_attack_units > 0 and bool(attack.frontier)
+    if attack.remaining_attack_units <= 0:
+        return False
+
+    return _compute_capturable_mask(game_map=game_map, attack=attack).any()
+
+
+def _compute_capturable_mask(
+    *, game_map: np.ndarray, attack: _ActiveAttack
+) -> np.ndarray:
+    """Tiles in the attack region one step outside attacker land (OpenCV dilate)."""
+    player_land = (game_map == attack.attacker_id).astype(np.uint8)
+    expanded = cv2.dilate(player_land, _KERNEL_4)
+
+    capturable = (
+        expanded.astype(bool)
+        & attack.component_mask
+        & (game_map != attack.attacker_id)
+        & (game_map != WATER)
+    )
+
+    # Stall when another player's land also touches this tile (shared invasion front).
+    other_players = ((game_map >= 2) & (game_map != attack.attacker_id)).astype(np.uint8)
+    contested = cv2.dilate(other_players, _KERNEL_4).astype(bool)
+    capturable &= ~contested
+
+    return capturable
+
+
+def _connected_component_mask(
+    *,
+    game_map: np.ndarray,
+    start_row: int,
+    start_col: int,
+    owner_id: int,
+) -> np.ndarray | None:
+    """4-connected component mask for owner_id containing the start tile."""
+    owner_mask = (game_map == owner_id).astype(np.uint8)
+    if owner_mask[start_row, start_col] == 0:
+        return None
+
+    _, labels = cv2.connectedComponents(owner_mask, connectivity=4)
+    label_id = int(labels[start_row, start_col])
+    if label_id == 0:
+        return None
+
+    return labels == label_id
+
+
+def _component_touches_player(
+    *,
+    game_map: np.ndarray,
+    component_mask: np.ndarray,
+    player_id: int,
+) -> bool:
+    player_land = (game_map == player_id).astype(np.uint8)
+    expanded = cv2.dilate(player_land, _KERNEL_4)
+    return bool(np.any(component_mask & expanded.astype(bool)))
+
+
+def _build_tile_cost_lookup(
+    *, game_map: np.ndarray, players: dict[int, Player]
+) -> np.ndarray:
+    """Per map-value capture cost; index by tile owner id from game_map."""
+    max_owner = max(int(game_map.max()), max(players, default=1))
+    lookup = np.full(max_owner + 1, LAND_ATTACK_UNDEFENDED_TILE_COST, dtype=np.int32)
+    lookup[WATER] = 0
+
+    for player_id, player in players.items():
+        if player_id < 2:
+            continue
+        if player.is_alive and player.balance > 0:
+            lookup[player_id] = LAND_ATTACK_DEFENDED_TILE_COST
+
+    return lookup
 
 
 def _apply_defender_balance_damage(
@@ -432,16 +490,6 @@ def _apply_defender_balance_damage(
 
     defender.balance -= damage
     attack.defender_damage_budget_remaining -= damage
-
-
-def _tile_cost_for_owner(*, owner: int, players: dict[int, Player]) -> int:
-    if owner <= 1:
-        return LAND_ATTACK_UNDEFENDED_TILE_COST
-
-    owner_player = players.get(owner)
-    if owner_player is not None and owner_player.is_alive and owner_player.balance > 0:
-        return LAND_ATTACK_DEFENDED_TILE_COST
-    return LAND_ATTACK_UNDEFENDED_TILE_COST
 
 
 def _already_attacking_defender(
@@ -506,63 +554,6 @@ def _normalize_percentage(value: object) -> float | None:
     if raw <= 0.0 or raw > 1.0:
         return None
     return raw
-
-
-def _collect_connected_component(
-    *,
-    game_map: np.ndarray,
-    start_row: int,
-    start_col: int,
-    owner_id: int,
-) -> tuple[np.ndarray, list[tuple[int, int]]]:
-    """Collect the 4-neighbor connected component for owner_id."""
-    mask = np.zeros(game_map.shape, dtype=bool)
-    tiles: list[tuple[int, int]] = []
-    queue: deque[tuple[int, int]] = deque([(start_row, start_col)])
-    mask[start_row, start_col] = True
-
-    while queue:
-        row, col = queue.popleft()
-        tiles.append((row, col))
-        for n_row, n_col in _neighbors4(game_map, row, col):
-            if mask[n_row, n_col]:
-                continue
-            if int(game_map[n_row, n_col]) != owner_id:
-                continue
-            mask[n_row, n_col] = True
-            queue.append((n_row, n_col))
-
-    return mask, tiles
-
-
-def _component_border_tiles_touching_player(
-    *,
-    game_map: np.ndarray,
-    component_tiles: list[tuple[int, int]],
-    player_id: int,
-) -> list[tuple[int, int]]:
-    """Return component tiles adjacent to the given player's territory."""
-    border_tiles: list[tuple[int, int]] = []
-    for row, col in component_tiles:
-        for n_row, n_col in _neighbors4(game_map, row, col):
-            if int(game_map[n_row, n_col]) == player_id:
-                border_tiles.append((row, col))
-                break
-    return border_tiles
-
-
-def _neighbors4(game_map: np.ndarray, row: int, col: int) -> list[tuple[int, int]]:
-    max_row, max_col = game_map.shape
-    neighbors: list[tuple[int, int]] = []
-    if row > 0:
-        neighbors.append((row - 1, col))
-    if row + 1 < max_row:
-        neighbors.append((row + 1, col))
-    if col > 0:
-        neighbors.append((row, col - 1))
-    if col + 1 < max_col:
-        neighbors.append((row, col + 1))
-    return neighbors
 
 
 def _in_bounds(game_map: np.ndarray, row: int, col: int) -> bool:
