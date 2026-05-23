@@ -97,6 +97,9 @@ class AttackEngine(ActionHandler):
             active_attacks=self._active_attacks,
             pending_actions=self._pending_actions,
         )
+        # Clash before BFS so reciprocal attacks compare strength without border
+        # tile order mattering, and so same-tick counters work on current units.
+        _resolve_mutual_clashes(active_attacks=self._active_attacks)
         _advance_active_attacks(
             game_map=game_map,
             players=players,
@@ -191,6 +194,68 @@ def _resolve_queued_actions(
         )
         if attack is not None:
             active_attacks.append(attack)
+
+
+def _resolve_mutual_clashes(*, active_attacks: list[_ActiveAttack]) -> None:
+    """Resolve reciprocal attack pairs before waves expand.
+
+    Reciprocal A↔B waves never share BFS tiles (each invades the other's land), so
+    clash is pair-level on remaining_attack_units, not frontier intersection.
+    """
+    if len(active_attacks) < 2:
+        return
+
+    # At most one attack per direction; lets us find B→A given A→B in O(1).
+    by_direction: dict[tuple[int, int], _ActiveAttack] = {
+        (attack.attacker_id, attack.defender_id): attack for attack in active_attacks
+    }
+    # Player-pair ids: we see both (A, B) and (B, A) keys when iterating the dict.
+    resolved_pairs: set[tuple[int, int]] = set()
+    # Defer list mutation until the end; use id() because attacks are unhashable.
+    removed_attack_ids: set[int] = set()
+
+    for (attacker_id, defender_id), attack in by_direction.items():
+        pair_key = (min(attacker_id, defender_id), max(attacker_id, defender_id))
+        if pair_key in resolved_pairs:
+            continue
+
+        counter = by_direction.get((defender_id, attacker_id))
+        if counter is None:
+            continue
+
+        resolved_pairs.add(pair_key)
+
+        stronger, weaker = attack, counter
+        stronger_strength = stronger.remaining_attack_units
+        weaker_strength = weaker.remaining_attack_units
+        if weaker_strength > stronger_strength:
+            stronger, weaker = counter, attack
+            stronger_strength, weaker_strength = weaker_strength, stronger_strength
+
+        if stronger_strength == weaker_strength:
+            # Full annihilation: neither wave expands this tick.
+            removed_attack_ids.add(id(attack))
+            removed_attack_ids.add(id(counter))
+            continue
+
+        # Weaker attack ends; stronger loses exactly the weaker's committed strength.
+        removed_attack_ids.add(id(weaker))
+        _apply_clash_cost(stronger, clash_units=weaker_strength)
+        if stronger.remaining_attack_units <= 0:
+            removed_attack_ids.add(id(stronger))
+
+    if removed_attack_ids:
+        active_attacks[:] = [
+            attack for attack in active_attacks if id(attack) not in removed_attack_ids
+        ]
+
+
+def _apply_clash_cost(attack: _ActiveAttack, *, clash_units: int) -> None:
+    # Mirror tile combat: clash spends combat power and caps economic pressure alike.
+    attack.remaining_attack_units = max(0, attack.remaining_attack_units - clash_units)
+    attack.defender_damage_budget_remaining = max(
+        0, attack.defender_damage_budget_remaining - clash_units
+    )
 
 
 def _advance_active_attacks(
