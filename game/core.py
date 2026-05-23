@@ -18,7 +18,7 @@ from game.constants import (
 from game.events import GameEvent, GameWonEvent, PlayerGameOverEvent
 from game.interest import apply_interest
 from game.player import Player, spawn_player
-from game.terrain import generate_terrain_grid
+from game.terrain import enforce_single_territory_blob_per_player, generate_terrain_grid
 
 
 class Game:
@@ -54,6 +54,7 @@ class Game:
             game_map=self.map,
             players=self.players,
         )
+        enforce_single_territory_blob_per_player(self.map)
         next_tick = self.tick_count + 1
         events = self._collect_tick_events(tick=next_tick)
         self.tick_count = next_tick
