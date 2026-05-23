@@ -22,9 +22,25 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from game.core import Game
+from game.bots import BorderBot
+from game.constants import FIRST_PLAYER_ID
+from game.core import Game, InitBotsFn
 from game.events import GameWonEvent, PlayerGameOverEvent
 from game.interest import hard_cap, interest_rate_per_tick, soft_cap
+
+GUI_DEFAULT_BOT_COUNT = 50
+
+
+def default_gui_init_bots(game: Game) -> None:
+    """Spawn player ``2`` (human) and ``GUI_DEFAULT_BOT_COUNT`` border bots for the viewer."""
+    player_id = game.add_player()
+    if player_id != FIRST_PLAYER_ID:
+        raise RuntimeError(
+            f"Expected first spawned player to be {FIRST_PLAYER_ID}, got {player_id}."
+        )
+    for _ in range(GUI_DEFAULT_BOT_COUNT):
+        if game.add_bot(bot_type=BorderBot) == -1:
+            break
 
 
 class MapView(QWidget):
@@ -198,18 +214,27 @@ class GameWindow(QMainWindow):
     ATTACK_PERCENTAGE = 0.25
     MIN_TICK_INTERVAL_MS = 50
     MAX_TICK_INTERVAL_MS = 2000
-    INITIAL_BOT_COUNT = 50
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        game: Game | None = None,
+        seed: int = 42,
+        land_coverage: float = 0.62,
+        init_bots: InitBotsFn | None = None,
+    ) -> None:
         super().__init__()
 
-        self.game = Game(seed=42)
-        self.player2_id = self.game.add_player()
-        if self.player2_id != 2:
-            raise RuntimeError(f"Expected first spawned player to be 2, got {self.player2_id}.")
-        for _ in range(self.INITIAL_BOT_COUNT):
-            if self.game.add_bot() == -1:
-                break
+        self.game = (
+            game
+            if game is not None
+            else Game(seed=seed, land_coverage=land_coverage, init_bots=init_bots)
+        )
+        self.player2_id = 2
+        if self.player2_id not in self.game.players:
+            raise RuntimeError(
+                "Game has no player 2; spawn player 2 in init_bots or use default_gui_init_bots."
+            )
 
         self.setWindowTitle("Territory Bot Viewer")
         self.resize(1100, 760)
@@ -556,12 +581,30 @@ def _ownership_map_to_qimage(ownership_map: np.ndarray) -> QImage:
     return image.copy()
 
 
-def main() -> int:
+def create_game_with_gui(
+    *,
+    seed: int = 42,
+    land_coverage: float = 0.62,
+    init_bots: InitBotsFn | None = None,
+) -> int:
+    """Run the territory game in a Qt GUI on the main thread.
+
+    Creates a :class:`QApplication`, opens :class:`GameWindow`, and calls
+    ``app.exec()``. This call **blocks** until the user closes the window.
+
+    Args:
+        seed: Random seed passed to :class:`~game.core.Game`.
+        land_coverage: Fraction of the grid that is land (see :class:`~game.core.Game`).
+        init_bots: Callable invoked on a fresh :class:`~game.core.Game` to spawn
+            players and bots. When ``None``, :func:`default_gui_init_bots` is used
+            (player ``2`` plus :data:`GUI_DEFAULT_BOT_COUNT` border bots).
+    """
     app = QApplication(sys.argv)
-    window = GameWindow()
+    setup_bots = default_gui_init_bots if init_bots is None else init_bots
+    window = GameWindow(seed=seed, land_coverage=land_coverage, init_bots=setup_bots)
     window.show()
     return app.exec()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(create_game_with_gui())
