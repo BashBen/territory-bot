@@ -270,9 +270,9 @@ def _advance_active_attacks(
     if not active_attacks:
         return
 
-    cost_lookup = _build_tile_cost_lookup(game_map=game_map, players=players)
     remaining: list[_ActiveAttack] = []
     for attack in active_attacks:
+        cost_lookup = _build_tile_cost_lookup(game_map=game_map, players=players)
         still_active = _advance_single_attack_layer(
             game_map=game_map,
             players=players,
@@ -397,23 +397,20 @@ def _advance_single_attack_layer(
 def _compute_capturable_mask(
     *, game_map: np.ndarray, attack: _ActiveAttack
 ) -> np.ndarray:
-    """Tiles in the attack region one step outside attacker land (OpenCV dilate)."""
+    """One ring per tick: dilate attacker land, intersect frozen invasion region.
+
+    Tiles may border the defender or another player — only same-tick list order
+    decides who captures land another attacker already owns this tick.
+    """
     player_land = (game_map == attack.attacker_id).astype(np.uint8)
     expanded = cv2.dilate(player_land, _KERNEL_4)
 
-    capturable = (
+    return (
         expanded.astype(bool)
         & attack.component_mask
         & (game_map != attack.attacker_id)
         & (game_map != WATER)
     )
-
-    # Stall when another player's land also touches this tile (shared invasion front).
-    other_players = ((game_map >= 2) & (game_map != attack.attacker_id)).astype(np.uint8)
-    contested = cv2.dilate(other_players, _KERNEL_4).astype(bool)
-    capturable &= ~contested
-
-    return capturable
 
 
 def _connected_component_mask(
