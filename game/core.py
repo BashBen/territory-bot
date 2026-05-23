@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import numpy as np
 
@@ -18,7 +18,9 @@ from game.constants import (
 from game.events import GameEvent, GameWonEvent, PlayerGameOverEvent
 from game.interest import apply_interest
 from game.player import Player, spawn_player
-from game.terrain import generate_terrain_grid
+from game.terrain import enforce_single_territory_blob_per_player, generate_terrain_grid
+
+InitBotsFn = Callable[["Game"], None]
 
 
 class Game:
@@ -30,7 +32,13 @@ class Game:
     - >=2: land occupied by player with that ID
     """
 
-    def __init__(self, seed: int | None = None, land_coverage: float = 0.62) -> None:
+    def __init__(
+        self,
+        seed: int | None = None,
+        land_coverage: float = 0.62,
+        *,
+        init_bots: InitBotsFn | None = None,
+    ) -> None:
         self.map: np.ndarray = generate_terrain_grid(
             seed=seed, land_coverage=land_coverage
         ).astype(np.uint8, copy=False)
@@ -43,6 +51,9 @@ class Game:
         self._action_engine = ActionEngine()
         self.winner_id: int | None = None
 
+        if init_bots is not None:
+            init_bots(self)
+
     def tick(self) -> list[GameEvent]:
         """Advance game time by one tick and return emitted events.
 
@@ -54,6 +65,7 @@ class Game:
             game_map=self.map,
             players=self.players,
         )
+        enforce_single_territory_blob_per_player(self.map)
         next_tick = self.tick_count + 1
         events = self._collect_tick_events(tick=next_tick)
         self.tick_count = next_tick

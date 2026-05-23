@@ -3,8 +3,8 @@ from __future__ import annotations
 import sys
 
 import numpy as np
-from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QMouseEvent, QPixmap
+from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor, QImage, QMouseEvent, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -15,57 +15,236 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
-from game.core import Game
+from game.bots import BorderBot
+from game.constants import FIRST_PLAYER_ID
+from game.core import Game, InitBotsFn
 from game.events import GameWonEvent, PlayerGameOverEvent
 from game.interest import hard_cap, interest_rate_per_tick, soft_cap
 
+GUI_DEFAULT_BOT_COUNT = 50
 
-class ClickableMapLabel(QLabel):
-    clicked = pyqtSignal(QPoint, QPoint)
+
+def default_gui_init_bots(game: Game) -> None:
+    """Spawn player ``2`` (human) and ``GUI_DEFAULT_BOT_COUNT`` border bots for the viewer."""
+    player_id = game.add_player()
+    if player_id != FIRST_PLAYER_ID:
+        raise RuntimeError(
+            f"Expected first spawned player to be {FIRST_PLAYER_ID}, got {player_id}."
+        )
+    for _ in range(GUI_DEFAULT_BOT_COUNT):
+        if game.add_bot(bot_type=BorderBot) == -1:
+            break
+
+
+class MapView(QWidget):
+    """Map viewport: wheel zoom, left-drag pan, right-click targeting."""
+
+    attack_requested = pyqtSignal(int, int, QPoint)
+    interaction_started = pyqtSignal()
+
+    MAP_ZOOM_MIN = 0.25
+    MAP_ZOOM_MAX = 8.0
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._map_height = 0
+        self._map_width = 0
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self._native_pixmap: QPixmap | None = None
+        self._dragging = False
+        self._drag_last = QPointF()
+
+        self.setMinimumSize(512, 512)
+        self.setMouseTracking(True)
+        self.setStyleSheet("background: #101418; border: 1px solid #2b3640;")
+
+        self._map_label = QLabel(self)
+        self._map_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+
+    def set_map_pixmap(self, pixmap: QPixmap, *, map_shape: tuple[int, int]) -> None:
+        self._map_height, self._map_width = map_shape
+        self._native_pixmap = pixmap
+        self._apply_view()
+
+    def fit_to_viewport(self) -> None:
+        """Scale and center the map so the full grid fits in the viewport."""
+        if self._native_pixmap is None or self._native_pixmap.isNull():
+            return
+
+        viewport_width = max(1, self.width())
+        viewport_height = max(1, self.height())
+        native_width = max(1, self._native_pixmap.width())
+        native_height = max(1, self._native_pixmap.height())
+
+        fit_zoom = min(
+            viewport_width / native_width,
+            viewport_height / native_height,
+        )
+        self._zoom = max(self.MAP_ZOOM_MIN, min(self.MAP_ZOOM_MAX, fit_zoom))
+
+        scaled_width = native_width * self._zoom
+        scaled_height = native_height * self._zoom
+        self._pan = QPointF(
+            (scaled_width - viewport_width) / 2.0,
+            (scaled_height - viewport_height) / 2.0,
+        )
+        self._apply_view()
+        self.interaction_started.emit()
+
+    def _apply_view(self) -> None:
+        if self._native_pixmap is None or self._native_pixmap.isNull():
+            return
+
+        scaled_width = max(1, int(self._native_pixmap.width() * self._zoom))
+        scaled_height = max(1, int(self._native_pixmap.height() * self._zoom))
+        scaled = self._native_pixmap.scaled(
+            scaled_width,
+            scaled_height,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self._map_label.setPixmap(scaled)
+        self._map_label.resize(scaled.size())
+        self._map_label.move(
+            int(round(-self._pan.x())),
+            int(round(-self._pan.y())),
+        )
+
+    def _cell_at(self, widget_pos: QPoint) -> tuple[int, int] | None:
+        pixmap = self._map_label.pixmap()
+        if pixmap is None or pixmap.isNull() or self._map_width <= 0 or self._map_height <= 0:
+            return None
+
+        pixmap_width = pixmap.width()
+        pixmap_height = pixmap.height()
+        if pixmap_width <= 0 or pixmap_height <= 0:
+            return None
+
+        pix_x = widget_pos.x() + self._pan.x()
+        pix_y = widget_pos.y() + self._pan.y()
+        if not (0 <= pix_x < pixmap_width and 0 <= pix_y < pixmap_height):
+            return None
+
+        col = int(pix_x * self._map_width / pixmap_width)
+        row = int(pix_y * self._map_height / pixmap_height)
+        row = max(0, min(self._map_height - 1, row))
+        col = max(0, min(self._map_width - 1, col))
+        return row, col
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y()
+        if delta == 0 or self._native_pixmap is None:
+            super().wheelEvent(event)
+            return
+
+        old_zoom = self._zoom
+        factor = 1.15 ** (delta / 120.0)
+        new_zoom = max(self.MAP_ZOOM_MIN, min(self.MAP_ZOOM_MAX, old_zoom * factor))
+        if new_zoom == old_zoom:
+            event.accept()
+            return
+
+        # Keep the map pixel under the cursor fixed while scaling.
+        cursor = event.position()
+        ratio = new_zoom / old_zoom
+        pixmap_x = cursor.x() + self._pan.x()
+        pixmap_y = cursor.y() + self._pan.y()
+        self._zoom = new_zoom
+        self._pan = QPointF(
+            pixmap_x * ratio - cursor.x(),
+            pixmap_y * ratio - cursor.y(),
+        )
+        self._apply_view()
+        self.interaction_started.emit()
+        event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(event.position().toPoint(), event.globalPosition().toPoint())
+            self._dragging = True
+            self._drag_last = event.position()
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            self.interaction_started.emit()
             event.accept()
             return
+
+        if event.button() == Qt.MouseButton.RightButton:
+            clicked_cell = self._cell_at(event.position().toPoint())
+            if clicked_cell is not None:
+                row, col = clicked_cell
+                self.attack_requested.emit(
+                    row, col, event.globalPosition().toPoint()
+                )
+            event.accept()
+            return
+
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging:
+            pos = event.position()
+            delta = pos - self._drag_last
+            self._drag_last = pos
+            # Dragging the map moves it with the cursor (not inverted).
+            self._pan -= delta
+            self._apply_view()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class GameWindow(QMainWindow):
     ATTACK_PERCENTAGE = 0.25
     MIN_TICK_INTERVAL_MS = 50
     MAX_TICK_INTERVAL_MS = 2000
-    INITIAL_BOT_COUNT = 50
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        game: Game | None = None,
+        seed: int = 42,
+        land_coverage: float = 0.62,
+        init_bots: InitBotsFn | None = None,
+    ) -> None:
         super().__init__()
 
-        self.game = Game(seed=42)
-        self.player2_id = self.game.add_player()
-        if self.player2_id != 2:
-            raise RuntimeError(f"Expected first spawned player to be 2, got {self.player2_id}.")
-        for _ in range(self.INITIAL_BOT_COUNT):
-            if self.game.add_bot() == -1:
-                break
+        self.game = (
+            game
+            if game is not None
+            else Game(seed=seed, land_coverage=land_coverage, init_bots=init_bots)
+        )
+        self.player2_id = 2
+        if self.player2_id not in self.game.players:
+            raise RuntimeError(
+                "Game has no player 2; spawn player 2 in init_bots or use default_gui_init_bots."
+            )
 
         self.setWindowTitle("Territory Bot Viewer")
         self.resize(1100, 760)
 
         self._selected_target: tuple[int, int, int] | None = None
+        self._initial_map_fit_done = False
 
-        self._map_label = ClickableMapLabel()
-        self._map_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._map_label.setMinimumSize(512, 512)
-        self._map_label.setStyleSheet(
-            "background: #101418; border: 1px solid #2b3640; padding: 8px;"
-        )
-        self._map_label.clicked.connect(self._on_map_clicked)
+        self._map_view = MapView()
+        self._map_view.attack_requested.connect(self._on_map_attack_requested)
+        self._map_view.interaction_started.connect(self._hide_attack_popup)
 
         self._tick_value = QLabel()
         self._tick_speed_value = QLabel()
@@ -128,7 +307,7 @@ class GameWindow(QMainWindow):
         layout = QHBoxLayout(root)
 
         left_column = QVBoxLayout()
-        left_column.addWidget(self._map_label, stretch=1)
+        left_column.addWidget(self._map_view, stretch=1)
 
         controls = QHBoxLayout()
         pause_button = QPushButton("Pause")
@@ -141,6 +320,16 @@ class GameWindow(QMainWindow):
         controls.addWidget(resume_button)
         controls.addWidget(spawn_button)
         left_column.addLayout(controls)
+
+        map_controls = QHBoxLayout()
+        fit_button = QPushButton("Fit to Screen")
+        fit_button.clicked.connect(self._fit_map_to_screen)
+        instructions_button = QPushButton("Instructions")
+        instructions_button.clicked.connect(self._show_instructions)
+        map_controls.addWidget(fit_button)
+        map_controls.addWidget(instructions_button)
+        map_controls.addStretch()
+        left_column.addLayout(map_controls)
 
         speed_controls = QHBoxLayout()
         speed_label = QLabel("Tick Speed")
@@ -208,7 +397,27 @@ class GameWindow(QMainWindow):
     def _on_tick_speed_changed(self, value: int) -> None:
         self._timer.setInterval(value)
         self._tick_speed_value.setText(f"{value} ms")
-        self._refresh_view()
+
+    def _fit_map_to_screen(self) -> None:
+        self._hide_attack_popup()
+        self._map_view.fit_to_viewport()
+
+    def _show_instructions(self) -> None:
+        QMessageBox.information(
+            self,
+            "Map controls",
+            (
+                "Map\n"
+                "• Scroll wheel — zoom in/out (toward cursor)\n"
+                "• Left-click + drag — pan\n"
+                "• Right-click — choose attack target\n"
+                "• Fit to Screen — show the full map in the viewport\n"
+                "\n"
+                "Attack\n"
+                "• Right-click enemy or neutral land, then confirm in the popup\n"
+                f"• Uses {int(self.ATTACK_PERCENTAGE * 100)}% of your balance per attack"
+            ),
+        )
 
     def _spawn_player(self) -> None:
         player_id = self.game.add_player()
@@ -224,13 +433,7 @@ class GameWindow(QMainWindow):
             self._prepend_event_text(self._format_event(event))
         self._refresh_view()
 
-    def _on_map_clicked(self, local_pos: QPoint, global_pos: QPoint) -> None:
-        clicked_cell = self._map_position_to_cell(local_pos)
-        if clicked_cell is None:
-            self._hide_attack_popup()
-            return
-
-        row, col = clicked_cell
+    def _on_map_attack_requested(self, row: int, col: int, global_pos: QPoint) -> None:
         owner_id = int(self.game.map[row, col])
         if owner_id in (0, self.player2_id):
             self._hide_attack_popup()
@@ -243,32 +446,6 @@ class GameWindow(QMainWindow):
         self._attack_popup.move(self.mapFromGlobal(global_pos))
         self._attack_popup.show()
         self._attack_popup.raise_()
-
-    def _map_position_to_cell(self, local_pos: QPoint) -> tuple[int, int] | None:
-        pixmap = self._map_label.pixmap()
-        if pixmap is None or pixmap.isNull():
-            return None
-
-        pixmap_width = pixmap.width()
-        pixmap_height = pixmap.height()
-        if pixmap_width <= 0 or pixmap_height <= 0:
-            return None
-
-        x_offset = (self._map_label.width() - pixmap_width) // 2
-        y_offset = (self._map_label.height() - pixmap_height) // 2
-
-        if not (
-            x_offset <= local_pos.x() < x_offset + pixmap_width
-            and y_offset <= local_pos.y() < y_offset + pixmap_height
-        ):
-            return None
-
-        map_height, map_width = self.game.map.shape
-        col = int((local_pos.x() - x_offset) * map_width / pixmap_width)
-        row = int((local_pos.y() - y_offset) * map_height / pixmap_height)
-        row = max(0, min(map_height - 1, row))
-        col = max(0, min(map_width - 1, col))
-        return row, col
 
     def _queue_attack_from_popup(self) -> None:
         if self._selected_target is None:
@@ -346,13 +523,8 @@ class GameWindow(QMainWindow):
             "yes" if self.game.winner_id == self.player2_id else "no"
         )
 
-        self._map_label.setPixmap(
-            QPixmap.fromImage(_ownership_map_to_qimage(ownership_map)).scaled(
-                self._map_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
-        )
+        native_pixmap = QPixmap.fromImage(_ownership_map_to_qimage(ownership_map))
+        self._map_view.set_map_pixmap(native_pixmap, map_shape=self.game.map.shape)
 
     def _prepend_event_text(self, text: str) -> None:
         self._event_list.insertItem(0, QListWidgetItem(text))
@@ -368,6 +540,12 @@ class GameWindow(QMainWindow):
                 f"{event.occupation_fraction:.2%} occupation."
             )
         return repr(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._initial_map_fit_done:
+            self._initial_map_fit_done = True
+            QTimer.singleShot(0, self._fit_map_to_screen)
 
     def resizeEvent(self, event) -> None:
         self._hide_attack_popup()
@@ -403,12 +581,30 @@ def _ownership_map_to_qimage(ownership_map: np.ndarray) -> QImage:
     return image.copy()
 
 
-def main() -> int:
+def create_game_with_gui(
+    *,
+    seed: int = 42,
+    land_coverage: float = 0.62,
+    init_bots: InitBotsFn | None = None,
+) -> int:
+    """Run the territory game in a Qt GUI on the main thread.
+
+    Creates a :class:`QApplication`, opens :class:`GameWindow`, and calls
+    ``app.exec()``. This call **blocks** until the user closes the window.
+
+    Args:
+        seed: Random seed passed to :class:`~game.core.Game`.
+        land_coverage: Fraction of the grid that is land (see :class:`~game.core.Game`).
+        init_bots: Callable invoked on a fresh :class:`~game.core.Game` to spawn
+            players and bots. When ``None``, :func:`default_gui_init_bots` is used
+            (player ``2`` plus :data:`GUI_DEFAULT_BOT_COUNT` border bots).
+    """
     app = QApplication(sys.argv)
-    window = GameWindow()
+    setup_bots = default_gui_init_bots if init_bots is None else init_bots
+    window = GameWindow(seed=seed, land_coverage=land_coverage, init_bots=setup_bots)
     window.show()
     return app.exec()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(create_game_with_gui())

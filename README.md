@@ -15,6 +15,9 @@ ownership_map = state[0]
 balance_map = state[1]
 ```
 
+By default `Game` spawns no players or bots; pass `init_bots=...` to run a
+setup callback after the map is created.
+
 ## Qt viewer
 
 Install dependencies, then run:
@@ -23,13 +26,36 @@ Install dependencies, then run:
 python qt_frontend.py
 ```
 
-The viewer auto-spawns player `2`, starts ticking every `0.5s`, shows a live
-ownership map from player `2`'s relative perspective, and displays player/game
-stats plus recent events.
+Or from your own script:
+
+```python
+from qt_frontend import create_game_with_gui
+from game.core import Game, InitBotsFn
+
+def my_init_bots(game: Game) -> None:
+    game.add_player()
+    for _ in range(10):
+        game.add_bot()
+
+# Blocks the main thread until the window is closed.
+create_game_with_gui(init_bots=my_init_bots)
+```
+
+`create_game_with_gui` runs the full game in a Qt GUI and **blocks** the calling
+thread until the user closes the window.
+
+The viewer expects player `2` to exist (`default_gui_init_bots` provides this
+when using `create_game_with_gui()` with no custom `init_bots`),
+starts ticking every `0.5s`, shows a live ownership map from player `2`'s
+relative perspective, and displays player/game stats plus recent events.
 
 ## API summary
 
-- `Game(seed=None, land_coverage=0.62)`: builds the terrain map on init.
+- `Game(seed=None, land_coverage=0.62, *, init_bots=None)`: builds the terrain
+  map on init. When `init_bots` is set, it is called once with the new `Game`
+  (default: spawn nothing).
+- `InitBotsFn`: optional bot lineup callback type.
+- `qt_frontend.default_gui_init_bots`: viewer default (player `2` + 50 bots).
 - `add_player() -> int`: spawns a player on unoccupied land and returns the player ID.
   New players also claim nearby unoccupied land in a radius of `5`.
   Raises `ValueError` if you try to add more than `MAX_PLAYER_COUNT` (100).

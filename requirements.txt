@@ -1,6 +1,7 @@
 ipykernel
 matplotlib
 numpy
+opencv-python
 pytorch
 pillow
 PyQt6

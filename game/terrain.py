@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import cv2
 import numpy as np
 
-from game.constants import ISLAND_GRID_SIZE, TARGET_ISLAND_COUNT
+from game.constants import FIRST_PLAYER_ID, ISLAND_GRID_SIZE, TARGET_ISLAND_COUNT
 
 WATER = np.uint8(0)
 LAND = np.uint8(1)
@@ -210,3 +211,24 @@ def _erode_mask(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
         )
         eroded = neighborhood == 9
     return eroded
+
+
+def enforce_single_territory_blob_per_player(game_map: np.ndarray) -> None:
+    """Keep each player's largest 4-connected blob; turn other owned tiles into land."""
+    player_ids = np.unique(game_map)
+    player_ids = player_ids[player_ids >= FIRST_PLAYER_ID]
+
+    for player_id in player_ids:
+        owner_mask = (game_map == player_id).astype(np.uint8)
+        if owner_mask.sum() == 0:
+            continue
+
+        label_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            owner_mask, connectivity=4
+        )
+        if label_count <= 2:
+            continue
+
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        main_label = 1 + int(np.argmax(areas))
+        game_map[(labels != 0) & (labels != main_label)] = LAND
