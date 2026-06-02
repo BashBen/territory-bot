@@ -9,11 +9,12 @@ from game.core import Game
 
 # ----- Model Params -----
 lr = 1e-3
-gamma = 0.995
-input_size = (2, 512, 512)
+GAMMA = 0.995
+input_size = 128
 hidden_size = 128
 num_layers = 2
 output_size = 4
+input_channels = 2
 
 # ----- Logger -----
 logging.basicConfig(
@@ -24,15 +25,24 @@ logging.basicConfig(
 
 # ----- Helpers ------
 def init_hidden(hidden_size, num_layers):
-    return (torch.zeros(num_layers, hidden_size), torch.zeros(num_layers, hidden_size))
+    return (torch.zeros(num_layers, 1, hidden_size), torch.zeros(num_layers, 1, hidden_size))
+
+def get_reward(init_map, final_map):
+    size = len(init_map)
+    init_unique, init_count = np.unique(init_map, return_counts=True)
+    final_unique, final_count = np.unique(final_map, return_counts=True)
+
+    init_count = dict(zip(init_unique, init_count)).get(2)
+    final_count = dict(zip(final_unique, final_count)).get(2)
+
+    reward = (final_count - init_count) / size
+    return reward
 
 
-
-def collect_episode(model: TerritoryModel):
-    game = Game()
-    map_x_size = game.get_state().shape(0)
-    map_y_size = game.get_state().shape(1)
+def collect_episode(game: Game, model: TerritoryModel):
     player_id = game.add_player()
+    map_x_size = game.get_state(relative=player_id).shape[1]
+    map_y_size = game.get_state(relative=player_id).shape[2]
 
     hidden = init_hidden(hidden_size, num_layers)
 
@@ -42,16 +52,20 @@ def collect_episode(model: TerritoryModel):
     # temp secondary map
     # balance_map = np.zeros(512, 512)
 
-    done = False
+    done = False # Don't need done, since we're checking for game_over event and returning values
+    tick_count = 0
 
     while not done:
         map_state = game.get_state()
-        model_input = torch.from_numpy(map_state)
 
-        mu, std, action_logits, hidden = model(model_input, hidden)
+        model_input = torch.from_numpy(map_state).unsqueeze(0)
+
+        mu, std, action_logits, hidden = model(model_input.float(), hidden)
 
         dist = torch.distributions.Normal(mu, std) 
-        x, y, strength = dist.sample() # Should return a 1d tensor with a sample from each dist
+        sample = dist.sample()
+
+        x, y, strength = dist.sample().squeeze(0) # Should return a 1d tensor with a sample from each dist
 
         adjusted_coords = torch.clamp(torch.stack([x, y]), 0, 511)
         adjusted_x, adjusted_y = torch.round(adjusted_coords)
@@ -64,9 +78,7 @@ def collect_episode(model: TerritoryModel):
 
         log_probs = action_dist.log_prob(action) + log_probs # add action log prob to total
 
-        if action.item() == 0:
-            game.tick()
-        else:
+        if action.item() == 1:
             action_payload = {
                 "type": "attack",
                 "target": [adjusted_x.item(), adjusted_y.item()],
@@ -76,16 +88,54 @@ def collect_episode(model: TerritoryModel):
             action_submitted = game.action(player_id, payload=action_payload)
 
             if not action_submitted:
-                logging.info(f'')
+                logging.info(f'Input from tick {tick_count} was invalid: {action_payload}')
+
+        events = game.tick()
+        next_map = game.get_state()[0]
+
+        reward = get_reward(map_state[0], next_map)
+        rewards.append(reward)
+
+        for event in events:
+            if (event.type == "game_won") or (event.type == "player_game_over" and event.player_id == player_id):
+                done = True
+                return log_probs, rewards, event.type
+            
+        tick_count += 1
 
 
+def calculate_loss(log_probs: list, rewards: list):
+    returns = []
+    G = 0
+
+    for reward in reversed(rewards):
+        G = reward + GAMMA * G
+        returns.insert(0, G)
+
+    returns = torch.tensor(returns)
+
+    loss = 0
+
+    for log_prob, G_t in zip(log_probs, returns):
+        loss += -log_prob * G_t
+
+    return loss
 
 
-
-
-
-
-
-model = TerritoryModel()
+# ----- Main Loop -----
+model = TerritoryModel(input_size, input_channels, hidden_size, num_layers)
 optimizer = optim.Adam(model.parameters(), lr=lr)
 
+
+for i in range(1):
+    game = Game()
+
+    log_probs, rewards, result = collect_episode(game, model)
+    print(result)
+
+    loss = calculate_loss(log_probs, rewards)
+    print(f"Episode {i}: \nrewards are: {rewards}\nloss is {loss}")
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
