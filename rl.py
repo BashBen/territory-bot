@@ -61,9 +61,10 @@ def collect_episode(game: Game, model: TerritoryModel):
         model_input = torch.from_numpy(map_state).unsqueeze(0)
 
         mu, std, action_logits, hidden = model(model_input.float(), hidden)
+        hidden = tuple(h.detach() for h in hidden)
 
         dist = torch.distributions.Normal(mu, std) 
-        sample = dist.sample()
+        # sample = dist.sample()
 
         x, y, strength = dist.sample().squeeze(0) # Should return a 1d tensor with a sample from each dist
 
@@ -71,12 +72,12 @@ def collect_episode(game: Game, model: TerritoryModel):
         adjusted_x, adjusted_y = torch.round(adjusted_coords)
         adjusted_strength = torch.clamp(strength, 0, 1)
 
-        log_probs = dist.log_prob(torch.stack([adjusted_x, adjusted_y, adjusted_strength])).sum()
+        # log_probs.append(dist.log_prob(torch.stack([adjusted_x, adjusted_y, adjusted_strength])).sum())
 
         action_dist = torch.distributions.Categorical(logits=action_logits)
         action = action_dist.sample()
 
-        log_probs = action_dist.log_prob(action) + log_probs # add action log prob to total
+        log_probs.append(action_dist.log_prob(action) + dist.log_prob(torch.stack([adjusted_x, adjusted_y, adjusted_strength])).sum()) # add action log prob to total
 
         if action.item() == 1:
             action_payload = {
@@ -100,6 +101,9 @@ def collect_episode(game: Game, model: TerritoryModel):
             if (event.type == "game_won") or (event.type == "player_game_over" and event.player_id == player_id):
                 done = True
                 return log_probs, rewards, event.type
+        
+        if tick_count >= 10000:
+            return log_probs, rewards, event.type
             
         tick_count += 1
 
@@ -132,6 +136,7 @@ for i in range(1):
 
     log_probs, rewards, result = collect_episode(game, model)
     print(result)
+    print("Game done")
 
     loss = calculate_loss(log_probs, rewards)
     print(f"Episode {i}: \nrewards are: {rewards}\nloss is {loss}")
