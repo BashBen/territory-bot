@@ -1,5 +1,8 @@
+.venv/
 venv/
 __pycache__/
 
 # Temporary work dir
 scraps
+
+training.log
